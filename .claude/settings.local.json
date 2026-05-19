@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(New-Item -ItemType Directory -Force \"D:\\\\Coding\\\\Projects\\\\pse-daily\")",
+      "WebFetch(domain:www.colfinancial.com)"
+    ]
+  }
+}
