@@ -3,14 +3,13 @@ PSE Daily Stock Newsletter
 - Stock data: phisix-api3.appspot.com
 - Price history: accumulated daily in data/history.csv
 - Insights: Claude Haiku API
-- Delivery: Gmail SMTP
+- Delivery: Resend
 
 Setup:
-  1. pip install anthropic matplotlib requests
-  2. Enable 2-Step Verification on your Google account.
-  3. Go to https://myaccount.google.com/apppasswords and create an App Password.
-  4. Set environment variables (or edit the CONFIG section below).
-  5. Run: python newsletter.py
+  1. pip install google-genai matplotlib requests resend yfinance
+  2. Sign up at resend.com and create an API key.
+  3. Set environment variables (or edit the CONFIG section below).
+  4. Run: python newsletter.py
 """
 
 import base64
@@ -19,12 +18,9 @@ import io
 import json
 import os
 import re
-import smtplib
 import urllib.request
 import warnings
 from datetime import datetime
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
 from pathlib import Path
 
 import matplotlib
@@ -37,12 +33,13 @@ warnings.filterwarnings("ignore")
 
 # ─── CONFIG ──────────────────────────────────────────────────────────────────
 
-SMTP_HOST = "smtp.gmail.com"
-SMTP_PORT = 587
-EMAIL_FROM        = os.environ.get("EMAIL_FROM", "your_email@gmail.com")
-EMAIL_PASSWORD    = os.environ.get("EMAIL_PASSWORD", "")
+# Get your API key at resend.com → API Keys
+RESEND_API_KEY    = os.environ.get("RESEND_API_KEY", "")
+# Use your verified domain, e.g. "PSE Newsletter <newsletter@yourdomain.com>"
+# On the free tier without a domain, use "onboarding@resend.dev" (sends to your own email only)
+EMAIL_FROM        = os.environ.get("EMAIL_FROM", "onboarding@resend.dev")
 EMAIL_TO          = os.environ.get("EMAIL_TO", "your_email@gmail.com")
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
 STOCK_WATCHLIST = ["ALI", "AREIT", "BDO", "BPI", "JFC", "MBT", "MREIT", "RCR", "SMPH"]
 
@@ -215,11 +212,11 @@ def make_index_chart(dates: list[str], prices: list[float]) -> str | None:
 # ─── AI insights ─────────────────────────────────────────────────────────────
 
 def generate_insights(stocks: list[dict]) -> dict[str, str]:
-    if not ANTHROPIC_API_KEY or not stocks:
+    if not GEMINI_API_KEY or not stocks:
         return {}
 
-    import anthropic
-    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    from google import genai
+    client = genai.Client(api_key=GEMINI_API_KEY)
     today = datetime.now().strftime("%B %d, %Y")
     stock_lines = "\n".join(
         f"- {s['symbol']} ({s['name']}): {s['pct']:+.2f}%, price ₱{s['price']:,.2f}"
@@ -236,12 +233,11 @@ def generate_insights(stocks: list[dict]) -> dict[str, str]:
         f"No markdown, no extra text."
     )
     try:
-        msg = client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=2048,
-            messages=[{"role": "user", "content": prompt}],
+        response = client.models.generate_content(
+            model="gemini-2.0-flash",
+            contents=prompt,
         )
-        text = msg.content[0].text.strip()
+        text = response.text.strip()
         match = re.search(r"\{.*\}", text, re.DOTALL)
         if match:
             return json.loads(match.group())
@@ -432,17 +428,15 @@ def build_html(
 # ─── Email ────────────────────────────────────────────────────────────────────
 
 def send_email(html: str) -> None:
+    import resend
+    resend.api_key = RESEND_API_KEY
     today = datetime.now().strftime("%b %d, %Y")
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = f"PSE Daily Newsletter — {today}"
-    msg["From"] = EMAIL_FROM
-    msg["To"] = EMAIL_TO
-    msg.attach(MIMEText(html, "html"))
-    with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
-        server.ehlo()
-        server.starttls()
-        server.login(EMAIL_FROM, EMAIL_PASSWORD)
-        server.sendmail(EMAIL_FROM, EMAIL_TO, msg.as_string())
+    resend.Emails.send({
+        "from": EMAIL_FROM,
+        "to": [EMAIL_TO],
+        "subject": f"PSE Daily Newsletter — {today}",
+        "html": html,
+    })
 
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
