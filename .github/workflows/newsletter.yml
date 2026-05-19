@@ -7,6 +7,9 @@ on:
     - cron: "35 7 * * 1-5"
   workflow_dispatch:  # allows manual trigger from GitHub UI
 
+permissions:
+  contents: write   # needed to commit price history back to the repo
+
 jobs:
   send-newsletter:
     runs-on: ubuntu-latest
@@ -29,4 +32,13 @@ jobs:
           EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
           EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
           EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: python newsletter.py
+
+      - name: Commit updated price history
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/history.csv
+          git diff --staged --quiet || git commit -m "chore: update price history [skip ci]"
+          git push
