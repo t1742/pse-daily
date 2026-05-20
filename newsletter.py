@@ -39,7 +39,7 @@ RESEND_API_KEY    = os.environ.get("RESEND_API_KEY", "")
 # On the free tier without a domain, use "onboarding@resend.dev" (sends to your own email only)
 EMAIL_FROM        = os.environ.get("EMAIL_FROM", "onboarding@resend.dev")
 EMAIL_TO          = os.environ.get("EMAIL_TO", "your_email@gmail.com")
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 
 STOCK_WATCHLIST = ["ALI", "AREIT", "BDO", "BPI", "JFC", "MBT", "MREIT", "RCR", "SMPH"]
 
@@ -152,15 +152,15 @@ def load_history(symbol: str) -> tuple[list[str], list[float]]:
 
 # ─── Chart generation ─────────────────────────────────────────────────────────
 
-def _encode_fig(fig) -> str:
+def _encode_fig(fig) -> bytes:
     buf = io.BytesIO()
     fig.savefig(buf, format="png", dpi=110, bbox_inches="tight", facecolor="white")
     plt.close(fig)
     buf.seek(0)
-    return base64.b64encode(buf.read()).decode()
+    return buf.read()
 
 
-def make_sparkline(symbol: str) -> str | None:
+def make_sparkline(symbol: str) -> bytes | None:
     dates, prices = load_history(symbol)
     if len(prices) < 2:
         return None
@@ -182,7 +182,7 @@ def make_sparkline(symbol: str) -> str | None:
     return _encode_fig(fig)
 
 
-def make_index_chart(dates: list[str], prices: list[float]) -> str | None:
+def make_index_chart(dates: list[str], prices: list[float]) -> bytes | None:
     if len(prices) < 2:
         return None
     color = "#16a34a" if prices[-1] >= prices[0] else "#dc2626"
@@ -192,7 +192,6 @@ def make_index_chart(dates: list[str], prices: list[float]) -> str | None:
     ax.fill_between(xs, prices, min(prices), alpha=0.10, color=color)
     ax.set_xlim(0, len(prices) - 1)
     ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{x:,.0f}"))
-    # Show ~5 evenly spaced date labels across x-axis
     n = len(dates)
     tick_idx = [0] + [int(n * i / 4) for i in range(1, 4)] + [n - 1]
     tick_idx = sorted(set(tick_idx))
@@ -209,14 +208,49 @@ def make_index_chart(dates: list[str], prices: list[float]) -> str | None:
     return _encode_fig(fig)
 
 
+def bytes_to_data_uri(png_bytes: bytes) -> str:
+    return "data:image/png;base64," + base64.b64encode(png_bytes).decode()
+
+
 # ─── AI insights ─────────────────────────────────────────────────────────────
 
+def generate_index_insight(index: dict) -> str:
+    if not GROQ_API_KEY or not index:
+        return ""
+    from groq import Groq
+    client = Groq(api_key=GROQ_API_KEY)
+    today = datetime.now().strftime("%B %d, %Y")
+    direction = "up" if index["pct"] >= 0 else "down"
+    prompt = (
+        f"You are a Philippine stock market analyst writing for a daily email newsletter. "
+        f"Today is {today}. The PSE Composite Index closed at {index['price']:,.2f}, "
+        f"{direction} {abs(index['change']):,.2f} points ({index['pct']:+.2f}%) for the day. "
+        f"Write 2–3 sentences explaining the likely drivers behind today's overall market movement. "
+        f"Consider: regional market trends, US market overnight performance, peso/dollar movement, "
+        f"BSP monetary policy stance, foreign fund flows, and any broad macro factors relevant to "
+        f"the Philippine market. Be specific and analytical, not generic."
+    )
+    try:
+        response = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.5,
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        print(f"  Index insight failed: {e}")
+        return ""
+
+
 def generate_insights(stocks: list[dict]) -> dict[str, str]:
-    if not GEMINI_API_KEY or not stocks:
+    if not GROQ_API_KEY:
+        print("  Skipping insights: GROQ_API_KEY not set")
+        return {}
+    if not stocks:
         return {}
 
-    from google import genai
-    client = genai.Client(api_key=GEMINI_API_KEY)
+    from groq import Groq
+    client = Groq(api_key=GROQ_API_KEY)
     today = datetime.now().strftime("%B %d, %Y")
     stock_lines = "\n".join(
         f"- {s['symbol']} ({s['name']}): {s['pct']:+.2f}%, price ₱{s['price']:,.2f}"
@@ -224,23 +258,30 @@ def generate_insights(stocks: list[dict]) -> dict[str, str]:
     )
     prompt = (
         f"You are a Philippine stock market analyst writing for a daily email newsletter. "
-        f"Today is {today}. For each PSE-listed stock below, write exactly one concise sentence "
-        f"(max 20 words) explaining the likely reason for today's price movement based on known "
-        f"sector trends, macro conditions, or the company's recent business context. "
-        f"Do not speculate on unverified news. If uncertain, reference the broader sector.\n\n"
+        f"Today is {today}. For each PSE-listed stock below, write 2–3 sentences explaining "
+        f"the likely reason for today's price movement. Go beyond the obvious — explain the "
+        f"underlying cause: e.g. for REITs mention interest rate sensitivity and yield "
+        f"expectations; for banks mention lending margins or macro conditions; for property "
+        f"mention demand drivers or rate environment; for mining mention commodity prices. "
+        f"Be specific to the sector and Philippine market context. "
+        f"Do not speculate on unverified company-specific news.\n\n"
         f"Stocks:\n{stock_lines}\n\n"
         f"Return a JSON object only — keys are stock symbols, values are insight strings. "
         f"No markdown, no extra text."
     )
     try:
-        response = client.models.generate_content(
-            model="gemini-2.0-flash",
-            contents=prompt,
+        response = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.5,
         )
-        text = response.text.strip()
+        text = response.choices[0].message.content.strip()
+        text = re.sub(r"^```(?:json)?\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
         match = re.search(r"\{.*\}", text, re.DOTALL)
         if match:
             return json.loads(match.group())
+        print(f"  Insight parsing failed — unexpected response format. First 200 chars: {text[:200]!r}")
     except Exception as e:
         print(f"  Insight generation failed: {e}")
     return {}
@@ -257,13 +298,13 @@ def _arrow(pct: float) -> str:
 def _sign(val: float) -> str:
     return "+" if val >= 0 else ""
 
-def _img(b64: str, width: int, height: int) -> str:
+def _img(src: str, width: int, height: int) -> str:
     return (
-        f"<img src='data:image/png;base64,{b64}' width='{width}' height='{height}' "
+        f"<img src='{src}' width='{width}' height='{height}' "
         f"style='display:block;' alt='' />"
     )
 
-def _stock_row(d: dict, insight: str | None = None, chart_b64: str | None = None,
+def _stock_row(d: dict, insight: str | None = None, chart_src: str | None = None,
                rank: int | None = None) -> str:
     color = _color(d["pct"])
     rank_cell = (
@@ -276,8 +317,8 @@ def _stock_row(d: dict, insight: str | None = None, chart_b64: str | None = None
         if insight else ""
     )
     chart_cell = (
-        f"<td style='padding:7px 10px;vertical-align:middle;'>{_img(chart_b64, 140, 36)}</td>"
-        if chart_b64 else ""
+        f"<td style='padding:7px 10px;vertical-align:middle;'>{_img(chart_src, 140, 36)}</td>"
+        if chart_src else ""
     )
     return (
         f"<tr style='border-bottom:1px solid #f3f4f6;'>"
@@ -338,21 +379,26 @@ def _section(title: str, content: str) -> str:
 
 def build_html(
     index: dict | None,
-    index_history: list[float],
     all_stocks: dict[str, dict],
     insights: dict[str, str],
     sparklines: dict[str, str | None],
     as_of: str,
+    index_chart_src: str | None = None,
+    index_insight: str = "",
 ) -> str:
     today = datetime.now().strftime("%B %d, %Y")
 
     # ── PSEi banner ──
     if index:
         idx_color = _color(index["pct"])
-        idx_chart_b64 = make_index_chart(*index_history)
         idx_chart_html = (
-            f"<div style='margin-top:10px;'>{_img(idx_chart_b64, 620, 84)}</div>"
-            if idx_chart_b64 else ""
+            f"<div style='margin-top:10px;'>{_img(index_chart_src, 620, 84)}</div>"
+            if index_chart_src else ""
+        )
+        idx_insight_html = (
+            f"<div style='font-size:12px;color:#4b5563;margin-top:10px;line-height:1.6;'>"
+            f"{index_insight}</div>"
+            if index_insight else ""
         )
         index_banner = (
             f"<div style='background:#f9fafb;border-bottom:1px solid #e5e7eb;padding:14px 28px;'>"
@@ -365,6 +411,7 @@ def build_html(
             f"&nbsp;({_sign(index['pct'])}{index['pct']:.2f}%)</span>"
             f"</div>"
             f"{idx_chart_html}"
+            f"{idx_insight_html}"
             f"</div>"
         )
     else:
@@ -427,16 +474,19 @@ def build_html(
 
 # ─── Email ────────────────────────────────────────────────────────────────────
 
-def send_email(html: str) -> None:
+def send_email(html: str, attachments: list[dict]) -> None:
     import resend
     resend.api_key = RESEND_API_KEY
     today = datetime.now().strftime("%b %d, %Y")
-    resend.Emails.send({
+    params: dict = {
         "from": EMAIL_FROM,
         "to": [EMAIL_TO],
         "subject": f"PSE Daily Newsletter — {today}",
         "html": html,
-    })
+    }
+    if attachments:
+        params["attachments"] = attachments
+    resend.Emails.send(params)
 
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
@@ -456,8 +506,8 @@ def main() -> None:
     sorted_by_pct = sorted(all_stocks.values(), key=lambda x: x["pct"], reverse=True)
     movers = sorted_by_pct[:TOP_N] + sorted_by_pct[-TOP_N:]
     symbols_needing_charts = {s for s in STOCK_WATCHLIST} | {d["symbol"] for d in movers}
-    sparklines = {sym: make_sparkline(sym) for sym in symbols_needing_charts}
-    filled = sum(1 for v in sparklines.values() if v)
+    sparkline_bytes = {sym: make_sparkline(sym) for sym in symbols_needing_charts}
+    filled = sum(1 for v in sparkline_bytes.values() if v)
     print(f"  {filled}/{len(symbols_needing_charts)} sparklines generated")
 
     stocks_for_insights = (
@@ -468,12 +518,41 @@ def main() -> None:
 
     print(f"Generating insights for {len(unique)} stocks...")
     insights = generate_insights(unique)
+    print("Generating index insight...")
+    index_insight = generate_index_insight(index) if index else ""
+
+    # Build CID attachments for inline images
+    attachments: list[dict] = []
+    sparklines_src: dict[str, str | None] = {}
+    for sym, png in sparkline_bytes.items():
+        if png:
+            cid = f"sparkline_{sym}"
+            sparklines_src[sym] = f"cid:{cid}"
+            attachments.append({
+                "content_id": cid,
+                "filename": f"{sym}.png",
+                "content": base64.b64encode(png).decode(),
+                "disposition": "inline",
+            })
+        else:
+            sparklines_src[sym] = None
+
+    index_chart_src: str | None = None
+    index_chart_png = make_index_chart(*index_history) if index_history[1] else None
+    if index_chart_png:
+        attachments.append({
+            "content_id": "index_chart",
+            "filename": "index_chart.png",
+            "content": base64.b64encode(index_chart_png).decode(),
+            "disposition": "inline",
+        })
+        index_chart_src = "cid:index_chart"
 
     print("Building newsletter...")
-    html = build_html(index, index_history, all_stocks, insights, sparklines, as_of)
+    html = build_html(index, all_stocks, insights, sparklines_src, as_of, index_chart_src, index_insight)
 
     print("Sending email...")
-    send_email(html)
+    send_email(html, attachments)
     print(f"Done! Newsletter sent to {EMAIL_TO}")
 
 
