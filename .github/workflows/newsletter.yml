@@ -1,11 +1,16 @@
 name: PSE Daily Newsletter
 
+# Paused — migrating to pse-wrap. Uncomment to resume.
+
+# on:
+#   schedule:
+#     # 7:35 AM UTC = 3:35 PM PHT (5 min after PSE close)
+#     # Runs Mon–Fri only
+#     - cron: "35 7 * * 1-5"
+#   workflow_dispatch:  # allows manual trigger from GitHub UI
+
 on:
-  schedule:
-    # 7:35 AM UTC = 3:35 PM PHT (5 min after PSE close)
-    # Runs Mon–Fri only
-    - cron: "35 7 * * 1-5"
-  workflow_dispatch:  # allows manual trigger from GitHub UI
+  workflow_dispatch:  # keep manual trigger only — won't auto-send
 
 permissions:
   contents: write   # needed to commit price history back to the repo
@@ -13,6 +18,7 @@ permissions:
 jobs:
   send-newsletter:
     runs-on: ubuntu-latest
+    if: false  # disabled — remove this line to re-enable
 
     steps:
       - name: Checkout
